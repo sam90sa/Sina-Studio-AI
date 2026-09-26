@@ -7,86 +7,64 @@ import rateLimit from 'express-rate-limit';
 import config from './config';
 import logger from './utils/logger';
 
-// Import routes
 import authRoutes from './api/routes/auth';
 import jobRoutes from './api/routes/jobs';
 import userRoutes from './api/routes/users';
 import projectRoutes from './api/routes/projects';
 import generateRoutes from './api/routes/generate';
 
-const app: Express = express();
+export function createApp(): Express {
+  const app = express();
+  app.set('trust proxy', 1);
+  app.use(helmet());
+  app.use(cors({
+    origin: config.cors.origin,
+    credentials: config.cors.credentials,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  }));
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ limit: '50mb', extended: true }));
+  app.use(compression());
 
-// Trust proxy
-app.set('trust proxy', 1);
+  if (config.nodeEnv !== 'test') {
+    app.use(morgan('combined', { stream: { write: (message) => logger.info(message.trim()) } }));
+  }
 
-// Security middleware
-app.use(helmet());
+  app.use('/api/', rateLimit({
+    windowMs: config.rateLimit.windowMs,
+    max: config.rateLimit.maxRequests,
+    message: 'Too many requests, please try again later',
+    standardHeaders: true,
+    legacyHeaders: false,
+  }));
 
-// CORS configuration
-const corsOptions = {
-  origin: config.corsOrigin.split(','),
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-};
-app.use(cors(corsOptions));
+  app.get('/health', (_req: Request, res: Response) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
 
-// Body parsing
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+  app.use(`${config.apiPrefix}/${config.apiVersion}/auth`, authRoutes);
+  app.use(`${config.apiPrefix}/${config.apiVersion}/jobs`, jobRoutes);
+  app.use(`${config.apiPrefix}/${config.apiVersion}/users`, userRoutes);
+  app.use(`${config.apiPrefix}/${config.apiVersion}/projects`, projectRoutes);
+  app.use(`${config.apiPrefix}/${config.apiVersion}/generate`, generateRoutes);
 
-// Compression
-app.use(compression());
+  app.use((req: Request, res: Response) => {
+    res.status(404).json({ error: 'Not Found', message: `Route ${req.path} not found`, statusCode: 404 });
+  });
 
-// Logging
-if (config.env !== 'test') {
-  app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg) } }));
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    logger.error('Unhandled error', err);
+    const statusCode = err.statusCode || err.status || 500;
+    res.status(statusCode).json({
+      error: err.name || 'Error',
+      message: err.message || 'Internal Server Error',
+      statusCode,
+      ...(config.nodeEnv === 'development' && { stack: err.stack }),
+    });
+  });
+
+  return app;
 }
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: config.rateLimitWindowMs,
-  max: config.rateLimitMaxRequests,
-  message: 'Too many requests, please try again later',
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use('/api/', limiter);
-
-// Health check endpoint
-app.get('/health', (req: Request, res: Response) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// API v1 routes
-app.use(`${config.apiPrefix}/${config.apiVersion}/auth`, authRoutes);
-app.use(`${config.apiPrefix}/${config.apiVersion}/jobs`, jobRoutes);
-app.use(`${config.apiPrefix}/${config.apiVersion}/users`, userRoutes);
-app.use(`${config.apiPrefix}/${config.apiVersion}/projects`, projectRoutes);
-app.use(`${config.apiPrefix}/${config.apiVersion}/generate`, generateRoutes);
-
-// 404 handler
-app.use((req: Request, res: Response) => {
-  res.status(404).json({
-    error: 'Not Found',
-    message: `Route ${req.path} not found`,
-    statusCode: 404,
-  });
-});
-
-// Error handling middleware
-app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-  logger.error('Unhandled error', err);
-
-  const statusCode = err.statusCode || err.status || 500;
-  const message = err.message || 'Internal Server Error';
-
-  res.status(statusCode).json({
-    error: err.name || 'Error',
-    message,
-    statusCode,
-    ...(config.env === 'development' && { stack: err.stack }),
-  });
-});
-
-export default app;
+export default createApp();
